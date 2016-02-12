@@ -18,49 +18,47 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.*;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
+ * Generator file that compute a XSD schema from a protobuf defintion file.
  * Created by mvincent on 08/02/2016.
  */
 public class Generator {
 
-    private final static String NS_PREFIX = "xs:";
-    private final static String TNS_PREFIX = "tns:";
-
+    /**
+     * Root XSD element.
+     */
     private static Element rootElement = null;
+    /**
+     * Root namespace.
+     */
     private static String rootNS = "";
+    /**
+     * Current element in XSD definition.
+     */
     private static Element currentElement = null;
-
+    /**
+     * Map of types imported with type as key and associated namespace prefix as value.
+     */
     private static Map<String, String> imports = new HashMap<>();
+    /**
+     * Map of namespaces to manage with prefix as key and uri as value.
+     */
     private static Map<String, String> namespaces = new HashMap<>();
-
+    /**
+     * Current generated namespace.
+     */
     private static String generatedNS;
+    /**
+     * Current generated namespace prefix.
+     */
     private static String generatedPrefixNS;
-
-    /**
-     * Cleaning an input string, removing special character.
-     *
-     * @param s Line to clean
-     * @return line cleaned
-     */
-    private static String cleaning(String s) {
-        return s.trim().replace(";", "");
-    }
-
-    /**
-     * Cleaning an input string, removing special character.
-     *
-     * @param s Line to clean
-     * @return line cleaned
-     */
-    private static String cleaningImport(String s, boolean transformToXsd) {
-        String clean = s.replace("\"", "");
-        return transformToXsd ? clean.trim().replace("proto", "xsd") : clean;
-    }
 
     /**
      * Filtering line not interesting like option or import
@@ -72,52 +70,50 @@ public class Generator {
         return !line.isEmpty() && !line.trim().startsWith("option ");
     }
 
-    private static String namespace(String pack) {
-        String[] words = pack.split("\\.");
-        List<String> listOfWords = Arrays.asList(words);
-        Collections.reverse(listOfWords);
-        return "http://" + String.join(".", listOfWords);
-    }
-
-    public static void generateFile(Path file) {
+    /**
+     * Generate XSD file.
+     *
+     * @param file Protobuf input file
+     */
+    public static void generateFile(Path file, List<Options> options) throws IOException {
         try {
             // Initialize document
             DocumentBuilderFactory docBuilderFactory = DocumentBuilderFactory.newInstance();
             DocumentBuilder docBuilder = docBuilderFactory.newDocumentBuilder();
             Document doc = docBuilder.newDocument();
-            Element schemaRoot = doc.createElementNS(XMLConstants.W3C_XML_SCHEMA_NS_URI, NS_PREFIX + "schema");
+            Element schemaRoot = doc.createElementNS(XMLConstants.W3C_XML_SCHEMA_NS_URI, XSD.NS_PREFIX + XSD.SCHEMA);
             doc.appendChild(schemaRoot);
-            NameTypeElementMaker elMaker = new NameTypeElementMaker(NS_PREFIX, doc);
+            NameTypeElementMaker elMaker = new NameTypeElementMaker(XSD.NS_PREFIX, doc);
 
             // Process each line
             try (Stream<String> stream = Files.lines(file)) {
 
                 stream
                         .filter(Generator::filtering)
-                        .map(Generator::cleaning)
-                        .map((Function<String, String>) line -> {
+                        .map(StringTools::cleaning)
+                        .map(line -> {
                             // Splitting elements for treatment
                             String[] elements = line.split(" ");
                             switch (elements[0]) {
                                 case "package":
                                     // Package contains namespace information
-                                    String ns = namespace(elements[1]);
-                                    schemaRoot.setAttributeNS("http://www.w3.org/2000/xmlns/", "xmlns:tns", ns);
+                                    String ns = XsdTools.namespace(elements[1]);
+                                    schemaRoot.setAttributeNS(XSD.XMLNS_URI, XSD.XMLNS_PREFIX + "tns", ns);
                                     rootNS = ns;
                                     break;
                                 case "import":
                                     // Filtering option import (specific protobuf scope)
                                     if (!elements[1].contains("option")) {
                                         // Manage recursively imports
-                                        manageImport(cleaningImport(elements[1], false));
+                                        manageImport(StringTools.cleaningImport(elements[1], false), options);
 
                                         // Generate import node
                                         Element importXsd = elMaker.createElement("import");
-                                        importXsd.setAttribute("schemaLocation", cleaningImport(elements[1], true));
+                                        importXsd.setAttribute(XSD.SCHEMA_LOCATION, StringTools.cleaningImport(elements[1], true));
                                         // If import uses a different namespace
                                         if (!generatedNS.equals(rootNS)) {
-                                            importXsd.setAttribute("namespace", generatedNS);
-                                            schemaRoot.setAttributeNS("http://www.w3.org/2000/xmlns/", "xmlns:" + generatedPrefixNS, generatedNS);
+                                            importXsd.setAttribute(XSD.NAMESPACE, generatedNS);
+                                            schemaRoot.setAttributeNS(XSD.XMLNS_URI, XSD.XMLNS_PREFIX + generatedPrefixNS, generatedNS);
                                         }
                                         schemaRoot.appendChild(importXsd);
 
@@ -137,7 +133,7 @@ public class Generator {
                                     currentElement.appendChild(complexContent);
                                     currentElement = complexContent;
                                     Element extension = elMaker.createElement("extension");
-                                    extension.setAttribute("base", TNS_PREFIX + elements[1]);
+                                    extension.setAttribute("base", XSD.TNS_PREFIX + elements[1]);
                                     currentElement.appendChild(extension);
                                     currentElement = extension;
                                     break;
@@ -148,44 +144,20 @@ public class Generator {
                                         // Skip this one, not used in XSD
                                         break;
                                     }
-                                    // Check if current element is <sequence>
-                                    if (!node.contains("sequence")) {
-                                        // Not in sequence yet, create node
-                                        Element sequence = elMaker.createElement("sequence");
-                                        currentElement.appendChild(sequence);
-                                        currentElement = sequence;
-                                    }
-                                    Element currentType = elMaker.createElement("element", elements[2], typeMapper(elements[1]));
-                                    currentType.setAttribute("maxOccurs", "1");
-                                    currentType.setAttribute("minOccurs", "1");
+                                    checkAndInitSequenceNode(node, elMaker);
+                                    Element currentType = elMaker.createElement(elements[2], XsdTools.typeMapper(elements[1], imports), "1", "1");
                                     currentElement.appendChild(currentType);
                                     break;
                                 case "optional":
                                     // Check if current element is <sequence>
-                                    node = currentElement.getNodeName();
-                                    if (!node.contains("sequence")) {
-                                        // Not in sequence yet, create node
-                                        Element sequence = elMaker.createElement("sequence");
-                                        currentElement.appendChild(sequence);
-                                        currentElement = sequence;
-                                    }
-                                    currentType = elMaker.createElement("element", elements[2], typeMapper(elements[1]));
-                                    currentType.setAttribute("maxOccurs", "1");
-                                    currentType.setAttribute("minOccurs", "0");
+                                    checkAndInitSequenceNode(currentElement.getNodeName(), elMaker);
+                                    currentType = elMaker.createElement(elements[2], XsdTools.typeMapper(elements[1], imports), "0", "1");
                                     currentElement.appendChild(currentType);
                                     break;
                                 case "repeated":
                                     // Check if current element is <sequence>
-                                    node = currentElement.getNodeName();
-                                    if (!node.contains("sequence")) {
-                                        // Not in sequence yet, create node
-                                        Element sequence = elMaker.createElement("sequence");
-                                        currentElement.appendChild(sequence);
-                                        currentElement = sequence;
-                                    }
-                                    currentType = elMaker.createElement("element", elements[2], typeMapper(elements[1]));
-                                    currentType.setAttribute("maxOccurs", "unbounded");
-                                    currentType.setAttribute("minOccurs", "0");
+                                    checkAndInitSequenceNode(currentElement.getNodeName(), elMaker);
+                                    currentType = elMaker.createElement(elements[2], XsdTools.typeMapper(elements[1], imports), "0", "unbounded");
                                     currentElement.appendChild(currentType);
                                     break;
                                 case "}":
@@ -197,7 +169,7 @@ public class Generator {
                         })
                         .collect(Collectors.toList());
             } catch (IOException e) {
-                e.printStackTrace();
+                System.exit(1);
             }
 
             TransformerFactory tFactory = TransformerFactory.newInstance();
@@ -205,16 +177,41 @@ public class Generator {
             transformer.setOutputProperty("{http://xml.apache.org/xslt}indent-amount", "4");
             transformer.setOutputProperty(OutputKeys.INDENT, "yes");
             DOMSource domSource = new DOMSource(doc);
-            //to create a file use something like this:
-            transformer.transform(domSource, new StreamResult(new File("mySchema.xsd")));
-            //to print to console use this:
-            transformer.transform(domSource, new StreamResult(System.out));
+            if (options != null && options.contains(Options.DRY_RUN)) {
+                // Print to console
+                transformer.transform(domSource, new StreamResult(System.out));
+            } else {
+                // Create a file
+                String filename = file.getFileName().toString();
+                transformer.transform(domSource, new StreamResult(new File(StringTools.replaceProtoByXsd(filename))));
+            }
         } catch (ParserConfigurationException | TransformerException e) {
-            e.printStackTrace();
+            System.exit(1);
         }
     }
 
-    private static void manageImport(String s) {
+    /**
+     * Check if node sequence is initialized, otherwise init it.
+     *
+     * @param node    Node to check
+     * @param elMaker Xsd element maker
+     */
+    private static void checkAndInitSequenceNode(String node, NameTypeElementMaker elMaker) {
+        if (!node.contains("sequence")) {
+            // Not in sequence yet, create node
+            Element sequence = elMaker.createElement("sequence");
+            currentElement.appendChild(sequence);
+            currentElement = sequence;
+        }
+    }
+
+    /**
+     * Compute type and namespaces from an imported file.
+     *
+     * @param s       Imported filename
+     * @param options Input options
+     */
+    private static void manageImport(String s, List<Options> options) {
         try {
             Path directory = Paths.get("./proto2xsd").toRealPath();
             System.out.println("Reading import " + Paths.get(directory.toString(), s));
@@ -223,25 +220,28 @@ public class Generator {
             try (Stream<String> stream = Files.lines(Paths.get(directory.toString(), s))) {
 
                 stream.filter(Generator::filtering)
-                        .map(Generator::cleaning)
-                        .map((Function<String, String>) line -> {
+                        .map(StringTools::cleaning)
+                        .map(line -> {
                             // Splitting elements for treatment
                             String[] elements = line.split(" ");
                             switch (elements[0]) {
                                 case "package":
-                                    String clean = cleaningImport(elements[1], false);
+                                    String clean = StringTools.cleaningImport(elements[1], false);
 
-                                    String ns = namespace(clean);
+                                    String ns = XsdTools.namespace(clean);
                                     if (ns.equals(rootNS)) {
                                         generatedNS = rootNS;
-                                        generatedPrefixNS = TNS_PREFIX;
+                                        generatedPrefixNS = XSD.TNS_PREFIX;
                                     } else {
-                                        generatedPrefixNS = generatePrefixNS(s);
+                                        generatedPrefixNS = XsdTools.generatePrefixNS(s);
                                         namespaces.put(generatedPrefixNS, ns);
                                     }
                                     break;
                                 case "import":
-                                    // TODO : recursive ?
+                                    if (options.contains(Options.RECURSIVE)) {
+                                        // Manage recursively imports
+                                        manageImport(StringTools.cleaningImport(elements[1], false), options);
+                                    }
                                     break;
                                 case "message":
                                     imports.put(elements[1], generatedPrefixNS);
@@ -252,77 +252,16 @@ public class Generator {
                         })
                         .collect(Collectors.counting());
             }
+
+            // Generate files for import if necessary
+            if (options.contains(Options.GENERATE_IMPORT)) {
+                generateFile(Paths.get(directory.toString(), s), options);
+            }
         } catch (IOException e) {
             System.err.println("Impossible to parse import file : " + s);
-        }
-    }
-
-    private static String generatePrefixNS(String input) {
-        String clean = input.replace("siti.", "").replace(".proto", "");
-        String ns = "";
-
-        if (clean.contains("_")) {
-            String[] elements = clean.split("_");
-            for (String element : elements) {
-                ns += element.substring(0, 1);
+            if (!options.contains(Options.IGNORE_IMPORT)) {
+                System.exit(1);
             }
-        } else {
-            ns = clean.substring(0, 3);
-        }
-        return ns + ":";
-    }
-
-    private static String typeMapper(String protoType) {
-        switch (protoType) {
-            case "string":
-                return NS_PREFIX + "string";
-            case "bool":
-                return NS_PREFIX + "booleans";
-            case "int32":
-            case "int64":
-                return NS_PREFIX + "integer";
-            case "bytes":
-                return NS_PREFIX + "base64Binary";
-            case "double":
-                return NS_PREFIX + "decimal";
-            default:
-                if (imports.get(protoType) == null) {
-                    // Unknown type, must be a internal type
-                    return TNS_PREFIX + protoType;
-                } else {
-                    return imports.get(protoType) + protoType;
-                }
-        }
-    }
-
-    /**
-     * Class with methods to make it more convenient to create Element nodes with
-     * namespace prefixed tagnames and with "name" and "type" attributes.
-     */
-    private static class NameTypeElementMaker {
-        private String nsPrefix;
-        private Document doc;
-
-        public NameTypeElementMaker(String nsPrefix, Document doc) {
-            this.nsPrefix = nsPrefix;
-            this.doc = doc;
-        }
-
-        public Element createElement(String elementName, String nameAttrVal, String typeAttrVal) {
-            Element element = doc.createElementNS(XMLConstants.W3C_XML_SCHEMA_NS_URI, nsPrefix + elementName);
-            if (nameAttrVal != null)
-                element.setAttribute("name", nameAttrVal);
-            if (typeAttrVal != null)
-                element.setAttribute("type", typeAttrVal);
-            return element;
-        }
-
-        public Element createElement(String elementName, String nameAttrVal) {
-            return createElement(elementName, nameAttrVal, null);
-        }
-
-        public Element createElement(String elementName) {
-            return createElement(elementName, null);
         }
     }
 }

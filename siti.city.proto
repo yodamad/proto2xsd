@@ -1,0 +1,19 @@
+package com.sopragroup.siti.commons.proto;
+
+import "csharp_options.proto";
+
+option java_package = "com.sopragroup.siti.commons.beans.generated";
+option java_outer_classname = "ProtobufCity";
+
+option (google.protobuf.csharp_file_options).namespace = "Siti.Commons.Proto"; 
+option (google.protobuf.csharp_file_options).umbrella_classname = "ProtobufCity"; 
+
+option optimize_for = SPEED;
+
+message City {
+	optional int64 id = 1 [(google.protobuf.csharp_field_options).property_name = "Id"];
+	required string name = 2 [(google.protobuf.csharp_field_options).property_name = "Name"];
+	required string countryCode = 3 [(google.protobuf.csharp_field_options).property_name = "CountryCode"];
+ 	required bool enabled = 4 [(google.protobuf.csharp_field_options).property_name = "Enabled"];
+ 	required int32 displayOrder = 5 [(google.protobuf.csharp_field_options).property_name = "DisplayOrder"];
+}
